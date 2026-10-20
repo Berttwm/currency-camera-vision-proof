@@ -45,11 +45,20 @@ func render(_ data: Data, pageNumber: Int, width: Int, height: Int) throws -> (C
     try require(abs(Double(width)/Double(height) - Double(displayWidth/displayHeight)) < 0.003, "Manifest/page aspect mismatch")
     context.setFillColor(CGColor(gray: 1, alpha: 1)); context.fill(bounds)
     context.clip(to: bounds)
-    context.concatenate(page.getDrawingTransform(.cropBox, rect: bounds, rotate: 0, preserveAspectRatio: true))
+    // Quartz's PDF fitting transform only reduces pages; map to a unit rect, then enlarge explicitly.
+    let edge = CGFloat(max(width, height))
+    let unitRect = CGRect(x: 0, y: 0, width: bounds.width/edge, height: bounds.height/edge)
+    let pdfTransform = page.getDrawingTransform(.cropBox, rect: unitRect, rotate: 0, preserveAspectRatio: true)
+    context.scaleBy(x: edge, y: edge)
+    context.concatenate(pdfTransform)
+    let drawingTransform = context.ctm
     context.drawPDFPage(page)
     guard let image = context.makeImage(), let bytes = context.data else { throw ProofError(description: "Cannot make rendered image") }
     return (image, ["width": width, "height": height, "rotation": page.rotationAngle,
                     "cropBox": rectJSON(box), "renderer": "Quartz; differs from Poppler",
+                    "drawingTransform": ["a": Double(drawingTransform.a), "b": Double(drawingTransform.b),
+                                         "c": Double(drawingTransform.c), "d": Double(drawingTransform.d),
+                                         "tx": Double(drawingTransform.tx), "ty": Double(drawingTransform.ty)],
                     "pixelFormat": "RGBA8-premultiplied-last", "bytesPerRow": width*4,
                     "pixelSha256": hash(Data(bytes: bytes, count: width*height*4))])
 }
@@ -112,6 +121,12 @@ func selfTest() throws {
     }
     pdf.endPDFPage(); pdf.closePDF()
     let original = output as Data
+    let (enlarged, enlargedInfo) = try render(original, pageNumber: 1, width: 1200, height: 800)
+    guard let enlargedBytes = enlarged.dataProvider?.data, let enlargedPointer = CFDataGetBytePtr(enlargedBytes)
+    else { throw ProofError(description: "No enlarged pixels") }
+    let corner = 40*enlarged.bytesPerRow + 40*4, opposite = 760*enlarged.bytesPerRow + 1160*4
+    try require(enlargedPointer[corner] > 240 && enlargedPointer[corner+2] < 20 && enlargedPointer[opposite] < 20 && enlargedPointer[opposite+2] > 240,
+                "PDF enlargement failed; transform=\(enlargedInfo["drawingTransform"]!)")
     let (image, _) = try render(original, pageNumber: 1, width: 600, height: 400)
     let (_, lines) = try recognize(image)
     for (value, isTop) in [("12.50", true), ("7.25", false)] {
