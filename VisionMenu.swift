@@ -14,6 +14,12 @@ func require(_ valid: Bool, _ message: String) throws {
     if !valid { throw ProofError(description: message) }
 }
 func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+func jsonData(_ value: [String: Any]) throws -> Data {
+    let pretty = try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
+    let lines = String(decoding: pretty, as: UTF8.self).components(separatedBy: "\n")
+    let unindented = lines.map { $0.trimmingCharacters(in: .whitespaces) }
+    return Data(unindented.joined(separator: "\n").utf8)
+}
 func rectJSON(_ r: CGRect) -> [String: Double] {
     ["x0": Double(r.minX), "y0": Double(r.minY), "x1": Double(r.maxX), "y1": Double(r.maxY)]
 }
@@ -108,6 +114,10 @@ func recognize(_ image: CGImage) throws -> ([String: Any], [[String: Any]]) {
              "recognitionMs": Date().timeIntervalSince(started) * 1000], lines)
 }
 func selfTest() throws {
+    let sample = "  quoted \"value\" \n café  "
+    let sampleData = try jsonData(["text": sample])
+    let roundTrip = try JSONSerialization.jsonObject(with: sampleData) as? [String: String]
+    try require(roundTrip?["text"] == sample, "JSON formatting changed recognized text")
     let output = NSMutableData()
     var media = CGRect(x: 0, y: 0, width: 600, height: 400)
     guard let consumer = CGDataConsumer(data: output as CFMutableData), let pdf = CGContext(consumer: consumer, mediaBox: &media, nil)
@@ -164,7 +174,7 @@ if CommandLine.arguments.dropFirst().first == "--self-test" {
     let result: [String: Any] = ["scope": "macOS static public-PDF OCR only; not an iPhone/camera performance result",
                                "macOS": ProcessInfo.processInfo.operatingSystemVersionString,
                                "sourceRevision": ProcessInfo.processInfo.environment["GITHUB_SHA"] ?? "local", "pages": results]
-    let bytes = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
-    try require(bytes.count < 2_000_000, "JSON exceeds artifact cap")
+    let bytes = try jsonData(result)
+    try require(bytes.count < 2_000_000, "JSON exceeds log cap")
     FileHandle.standardOutput.write(bytes)
 }
