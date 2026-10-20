@@ -78,7 +78,7 @@ func recognize(_ image: CGImage) throws -> ([String: Any], [[String: Any]]) {
     let automaticLanguage = request.automaticallyDetectsLanguage
     let languageCorrection = request.usesLanguageCorrection
     let supported = try request.supportedRecognitionLanguages()
-    try require(Set(languages).isSubset(of: Set(supported)), "Default language unavailable; no silent substitution")
+    try require(Set(languages).isSubset(of: Set(supported)), "Default language unavailable; no silent substitution. Defaults=\(languages); supported=\(supported); automatic=\(automaticLanguage); correction=\(languageCorrection)")
     let started = Date()
     try VNImageRequestHandler(cgImage: image, orientation: .up, options: [:]).perform([request])
     let regex = try NSRegularExpression(pattern: #"\S+"#)
