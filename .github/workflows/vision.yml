@@ -1,0 +1,30 @@
+name: Public menu Vision proof
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  recognize:
+    if: ${{ github.event.repository.visibility == 'public' }}
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Record compiler and operating system
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version
+          xcrun swiftc --version
+      - name: Compile and check coordinates
+        run: |
+          xcrun swiftc -O -swift-version 5 -target "$(uname -m)-apple-macosx13.0" -framework Vision -framework CoreGraphics -framework CoreText -framework PDFKit -framework CryptoKit VisionMenu.swift -o "$RUNNER_TEMP/vision-menu"
+          "$RUNNER_TEMP/vision-menu" --self-test
+      - name: Read the three frozen public menus
+        run: |
+          "$RUNNER_TEMP/vision-menu" sources.json > "$RUNNER_TEMP/vision-results.json"
+          echo CURRENCY_CAMERA_VISION_JSON_BEGIN
+          cat "$RUNNER_TEMP/vision-results.json"
+          printf '\nCURRENCY_CAMERA_VISION_JSON_END\n'

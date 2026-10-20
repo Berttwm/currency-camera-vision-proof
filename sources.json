@@ -1,0 +1,26 @@
+[
+  {
+    "id": "breakfast-club-july",
+    "url": "https://static1.squarespace.com/static/68b025163c03825dcdc6fcb7/t/6a629c2ed9babe084f90a4ed/1784847406331/Web+Menu+Breakfast+July+2026.pdf",
+    "sha256": "077b8d2c90c3c8bdb7fccc6923e8259e3066e3e06e2321ee325fbc10c8ea18ee",
+    "page": 1,
+    "width": 920,
+    "height": 1300
+  },
+  {
+    "id": "russ-daughters-placemat",
+    "url": "https://www.russanddaughterscafe.com/s/093026-cafe-placemat-menu-WEB.pdf",
+    "sha256": "8056fdc79e3b4dccf17911500d4711594b507064783652ef6ea3b5f01b970245",
+    "page": 1,
+    "width": 1300,
+    "height": 976
+  },
+  {
+    "id": "commonman-day",
+    "url": "https://cdn.shopify.com/s/files/1/1000/4780/files/CMCR_-_Day_Menu_A4_15Oct_FA.pdf?v=1792381535",
+    "sha256": "eddbda926826308d051c89432248110c3e0a33db5633ff77d8ae5bf1473452e0",
+    "page": 1,
+    "width": 920,
+    "height": 1300
+  }
+]
