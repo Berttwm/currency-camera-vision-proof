@@ -22,8 +22,11 @@ func topLeft(_ r: CGRect, _ width: Int, _ height: Int) -> CGRect {
            width: r.width * CGFloat(width), height: r.height * CGFloat(height))
 }
 func quadJSON(_ box: VNRectangleObservation, _ width: Int, _ height: Int) -> [[String: Double]] {
-    [box.topLeft, box.topRight, box.bottomRight, box.bottomLeft].map {
-        ["x": Double($0.x) * Double(width), "y": (1-Double($0.y)) * Double(height)]
+    let points: [CGPoint] = [box.topLeft, box.topRight, box.bottomRight, box.bottomLeft]
+    return points.map { point -> [String: Double] in
+        let x: Double = Double(point.x) * Double(width)
+        let y: Double = (1.0 - Double(point.y)) * Double(height)
+        return ["x": x, "y": y]
     }
 }
 func render(_ data: Data, pageNumber: Int, width: Int, height: Int) throws -> (CGImage, [String: Any]) {
