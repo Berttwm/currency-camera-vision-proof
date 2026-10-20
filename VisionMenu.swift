@@ -72,12 +72,13 @@ func recognize(_ image: CGImage) throws -> ([String: Any], [[String: Any]]) {
     let request = VNRecognizeTextRequest()
     request.revision = VNRecognizeTextRequestRevision3
     request.recognitionLevel = .accurate
-    request.automaticallyDetectsLanguage = true
-    request.usesLanguageCorrection = false
     request.minimumTextHeight = 0
-    request.recognitionLanguages = ["en-US", "ja-JP", "zh-Hans", "zh-Hant", "ko-KR"]
+    // Uniform baseline: leave the SDK's language selection and correction settings untouched.
+    let languages = request.recognitionLanguages
+    let automaticLanguage = request.automaticallyDetectsLanguage
+    let languageCorrection = request.usesLanguageCorrection
     let supported = try request.supportedRecognitionLanguages()
-    try require(Set(request.recognitionLanguages).isSubset(of: Set(supported)), "Configured language unavailable; no silent substitution")
+    try require(Set(languages).isSubset(of: Set(supported)), "Default language unavailable; no silent substitution")
     let started = Date()
     try VNImageRequestHandler(cgImage: image, orientation: .up, options: [:]).perform([request])
     let regex = try NSRegularExpression(pattern: #"\S+"#)
@@ -107,9 +108,10 @@ func recognize(_ image: CGImage) throws -> ([String: Any], [[String: Any]]) {
                       "quad": quadJSON(observation, image.width, image.height),
                       "bbox": rectJSON(topLeft(observation.boundingBox, image.width, image.height)), "words": words])
     }
-    return (["revision": request.revision, "recognitionLevel": "accurate", "automaticallyDetectsLanguage": true,
-             "usesLanguageCorrection": false, "minimumTextHeight": request.minimumTextHeight,
-             "languages": request.recognitionLanguages, "supportedLanguages": supported,
+    return (["revision": request.revision, "recognitionLevel": "accurate", "automaticallyDetectsLanguage": automaticLanguage,
+             "usesLanguageCorrection": languageCorrection, "minimumTextHeight": request.minimumTextHeight,
+             "languagePolicy": "SDK defaults; captured before recognition",
+             "languages": languages, "supportedLanguages": supported,
              "geometryPrecision": "vision-word-approximate", "confidenceScale": "native 0..1; uncalibrated",
              "recognitionMs": Date().timeIntervalSince(started) * 1000], lines)
 }
@@ -159,6 +161,10 @@ if CommandLine.arguments.dropFirst().first == "--self-test" {
     try require(CommandLine.arguments.count == 2, "Pass sources.json or --self-test")
     let sources = try JSONDecoder().decode([Source].self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
     try require(sources.count == 3 && Set(sources.map(\.id)).count == 3, "Expected three distinct frozen sources")
+    let defaultRequest = VNRecognizeTextRequest()
+    let sdkLanguageDefaults: [String: Any] = ["languages": defaultRequest.recognitionLanguages,
+                                            "automaticallyDetectsLanguage": defaultRequest.automaticallyDetectsLanguage,
+                                            "usesLanguageCorrection": defaultRequest.usesLanguageCorrection]
     var results: [[String: Any]] = []
     for source in sources {
         try require(source.url.scheme == "https" && source.page > 0 && max(source.width, source.height) == 1300 && min(source.width, source.height) > 0, "Invalid source manifest")
@@ -172,6 +178,7 @@ if CommandLine.arguments.dropFirst().first == "--self-test" {
                         "page": source.page, "render": rendered, "request": config, "lines": lines])
     }
     let result: [String: Any] = ["scope": "macOS static public-PDF OCR only; not an iPhone/camera performance result",
+                               "sdkLanguageDefaults": sdkLanguageDefaults, "defaultsCapturedBeforePdfDownload": true,
                                "macOS": ProcessInfo.processInfo.operatingSystemVersionString,
                                "sourceRevision": ProcessInfo.processInfo.environment["GITHUB_SHA"] ?? "local", "pages": results]
     let bytes = try jsonData(result)
