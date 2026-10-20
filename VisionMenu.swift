@@ -15,15 +15,15 @@ func require(_ valid: Bool, _ message: String) throws {
 }
 func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
 func rectJSON(_ r: CGRect) -> [String: Double] {
-    ["x0": r.minX, "y0": r.minY, "x1": r.maxX, "y1": r.maxY]
+    ["x0": Double(r.minX), "y0": Double(r.minY), "x1": Double(r.maxX), "y1": Double(r.maxY)]
 }
 func topLeft(_ r: CGRect, _ width: Int, _ height: Int) -> CGRect {
-    CGRect(x: r.minX * Double(width), y: (1-r.maxY) * Double(height),
-           width: r.width * Double(width), height: r.height * Double(height))
+    CGRect(x: r.minX * CGFloat(width), y: (1-r.maxY) * CGFloat(height),
+           width: r.width * CGFloat(width), height: r.height * CGFloat(height))
 }
 func quadJSON(_ box: VNRectangleObservation, _ width: Int, _ height: Int) -> [[String: Double]] {
     [box.topLeft, box.topRight, box.bottomRight, box.bottomLeft].map {
-        ["x": $0.x * Double(width), "y": (1-$0.y) * Double(height)]
+        ["x": Double($0.x) * Double(width), "y": (1-Double($0.y)) * Double(height)]
     }
 }
 func render(_ data: Data, pageNumber: Int, width: Int, height: Int) throws -> (CGImage, [String: Any]) {
@@ -39,7 +39,7 @@ func render(_ data: Data, pageNumber: Int, width: Int, height: Int) throws -> (C
     let displayWidth = rotated ? box.height : box.width
     let displayHeight = rotated ? box.width : box.height
     try require(displayWidth > 0 && displayHeight > 0, "Invalid page dimensions")
-    try require(abs(Double(width)/Double(height) - displayWidth/displayHeight) < 0.003, "Manifest/page aspect mismatch")
+    try require(abs(Double(width)/Double(height) - Double(displayWidth/displayHeight)) < 0.003, "Manifest/page aspect mismatch")
     context.setFillColor(CGColor(gray: 1, alpha: 1)); context.fill(bounds)
     context.clip(to: bounds)
     context.concatenate(page.getDrawingTransform(.cropBox, rect: bounds, rotate: 0, preserveAspectRatio: true))
