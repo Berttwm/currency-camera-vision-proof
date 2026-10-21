@@ -44,7 +44,7 @@ jobs:
           PY
       - name: Render public PDFs once and read the exact bytes on Mac
         run: |
-          xcrun swiftc -O -swift-version 5 -target "$(uname -m)-apple-macosx13.0" -framework Vision -framework CoreGraphics -framework CoreText -framework PDFKit -framework CryptoKit main.swift Proof.swift -o "$RUNNER_TEMP/mac-proof"
+          xcrun swiftc -O -swift-version 5 -target "$(uname -m)-apple-macosx13.0" -framework Vision -framework CoreGraphics -framework CoreText -framework PDFKit -framework CryptoKit -framework DataDetection main.swift Proof.swift -o "$RUNNER_TEMP/mac-proof"
           "$RUNNER_TEMP/mac-proof" "$PWD/Inputs" > "$RUNNER_TEMP/mac-result.json"
           echo CURRENCY_CAMERA_MAC_JSON_BEGIN
           cat "$RUNNER_TEMP/mac-result.json"

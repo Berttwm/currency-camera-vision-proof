@@ -4,6 +4,7 @@ import CoreGraphics
 import CoreText
 import PDFKit
 import CryptoKit
+import DataDetection
 
 struct Source: Codable {
     let id: String, url: URL, sha256: String
@@ -225,4 +226,45 @@ func recognizeInputs(_ directory: URL, defaults: [String: Any], platform: String
             "runIdentity": runIdentity, "inputManifestSha256": hash(data),
             "renderScale": 2, "colorSpace": "DeviceRGB", "defaultsCapturedBeforeInputRead": true,
             "sdkLanguageDefaults": defaults, "pages": results]
+}
+
+// Diagnostic only: scan unchanged recognized strings, without inventing currency/price context.
+@available(macOS 26.0, iOS 26.0, *)
+func semanticProbe(_ result: [String: Any]) async -> [String: Any] {
+    let started = Date()
+    let controls = ["Coffee GBP 2.00", "Coffee 2.00", "Coffee 2", "ADD EGG 2.00", "USD 12.50",
+                    "Coffee 12.50", "SINCE 1914", "Quantity 2", "Weight 330 g", "Volume 330 ml",
+                    "Calories 330", "Phone +65 6123 4567", "Open 09:00-17:00", "Tax 9%",
+                    "Protein 12.50 g", "Coffee SGD 12.50", "Coffee USD 12O", "SINCE 191 A", "Serves 2", "Add 2 eggs"]
+    var inputs: [(String, Int, String)] = controls.enumerated().map { ("synthetic-control", $0.offset, $0.element) }
+    for page in result["pages"] as? [[String: Any]] ?? [] {
+        for (index, line) in (page["lines"] as? [[String: Any]] ?? []).enumerated() {
+            if let id = page["id"] as? String, let text = line["text"] as? String { inputs.append((id, index, text)) }
+        }
+    }
+    var records: [[String: Any]] = []
+    for (id, index, text) in inputs {
+        var matches: [[String: Any]] = []
+        for await match in text.dataDetectorMatches(.all) {
+            var item: [String: Any] = [:]
+            switch match.details {
+            case .moneyAmount(let money):
+                item = ["kind": "money", "amount": NSDecimalNumber(decimal: money.amount).stringValue, "currency": money.currency.identifier]
+            case .measurement: item["kind"] = "measurement"
+            case .calendarEvent: item["kind"] = "calendar"
+            case .phoneNumber: item["kind"] = "phone"
+            default: item["kind"] = "other"
+            }
+            if let range = match.range {
+                let span = NSRange(range, in: text)
+                item["text"] = String(text[range]); item["startUTF16"] = span.location; item["lengthUTF16"] = span.length
+            }
+            matches.append(item)
+        }
+        records.append(["id": id, "lineIndex": index, "text": text, "matches": matches])
+    }
+    return ["scope": "Mac string-only diagnostic, not price classification or iOS/phone semantics",
+            "options": "SDK defaults; no document-language, region or currency hint supplied",
+            "locale": Locale.current.identifier, "currencyWarning": "Detected currency may be a best guess; never substitutes for selected currency",
+            "elapsedMs": Date().timeIntervalSince(started) * 1000, "records": records]
 }

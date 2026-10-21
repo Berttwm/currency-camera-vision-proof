@@ -30,7 +30,10 @@ guard let run = ProcessInfo.processInfo.environment["GITHUB_RUN_ID"], let attemp
     throw ProofError(description: "Missing workflow run identity")
 }
 try jsonData(["runIdentity": run + "-" + attempt, "renderScale": 2, "colorSpace": "DeviceRGB", "pages": inputs]).write(to: output.appendingPathComponent("inputs.json"), options: .atomic)
-let result = try recognizeInputs(output, defaults: defaults, platform: "macOS")
+var result = try recognizeInputs(output, defaults: defaults, platform: "macOS")
+if #available(macOS 26.0, *) {
+    result["semanticProbe"] = await semanticProbe(result)
+} else { throw ProofError(description: "String semantic probe requires macOS26") }
 let bytes = try jsonData(result)
 try require(bytes.count < 4_000_000, "Mac JSON exceeds log cap")
 FileHandle.standardOutput.write(bytes)
