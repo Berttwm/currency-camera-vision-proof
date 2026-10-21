@@ -14,6 +14,10 @@ func require(_ valid: Bool, _ message: String) throws {
     if !valid { throw ProofError(description: message) }
 }
 func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+func supportsLanguages(_ requested: [String], _ available: [String]) -> Bool {
+    let canonical: (String) -> String = { Locale.canonicalLanguageIdentifier(from: $0) }
+    return Set(requested.map(canonical)).isSubset(of: Set(available.map(canonical)))
+}
 func jsonData(_ value: [String: Any]) throws -> Data {
     let pretty = try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
     let lines = String(decoding: pretty, as: UTF8.self).components(separatedBy: "\n")
@@ -78,7 +82,7 @@ func recognize(_ image: CGImage) throws -> ([String: Any], [[String: Any]]) {
     let automaticLanguage = request.automaticallyDetectsLanguage
     let languageCorrection = request.usesLanguageCorrection
     let supported = try request.supportedRecognitionLanguages()
-    try require(Set(languages).isSubset(of: Set(supported)), "Default language unavailable; no silent substitution. Defaults=\(languages); supported=\(supported); automatic=\(automaticLanguage); correction=\(languageCorrection)")
+    try require(supportsLanguages(languages, supported), "Default language unavailable; no silent substitution. Defaults=\(languages); supported=\(supported); automatic=\(automaticLanguage); correction=\(languageCorrection)")
     let started = Date()
     try VNImageRequestHandler(cgImage: image, orientation: .up, options: [:]).perform([request])
     let regex = try NSRegularExpression(pattern: #"\S+"#)
@@ -116,6 +120,8 @@ func recognize(_ image: CGImage) throws -> ([String: Any], [[String: Any]]) {
              "recognitionMs": Date().timeIntervalSince(started) * 1000], lines)
 }
 func selfTest() throws {
+    try require(supportsLanguages(["en_US"], ["en-US"]), "Equivalent language identifiers rejected")
+    try require(!supportsLanguages(["en_AU"], ["en-US"]) && !supportsLanguages(["de-DE"], ["en-US"]), "Unsupported language accepted")
     let sample = "  quoted \"value\" \n café  "
     let sampleData = try jsonData(["text": sample])
     let roundTrip = try JSONSerialization.jsonObject(with: sampleData) as? [String: String]
