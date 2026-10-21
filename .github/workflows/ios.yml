@@ -58,6 +58,17 @@ jobs:
           tail -n 20 "$RUNNER_TEMP/build.log"
       - name: Run iOS inference and verify identical menu bytes
         run: |
+          python3 - <<'PY'
+          import json, os, plistlib
+          from pathlib import Path
+          plist = plistlib.loads((Path(os.environ['RUNNER_TEMP']) / 'derived/Build/Products/Release-iphonesimulator/VisionProof.app/Info.plist').read_bytes())
+          keys = ['CFBundleIdentifier', 'CFBundleVersion', 'CFBundleShortVersionString', 'ProofRunIdentity', 'ProofSourceRevision']
+          print('CURRENCY_CAMERA_BUILT_METADATA ' + json.dumps({key: plist.get(key) for key in keys}), flush=True)
+          assert plist.get('CFBundleIdentifier') == 'org.currencycamera.visionproof'
+          assert plist.get('CFBundleVersion') == '1' and plist.get('CFBundleShortVersionString') == '1.0'
+          assert plist.get('ProofRunIdentity') == os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'], 'Missing/wrong built run identity'
+          assert plist.get('ProofSourceRevision') == os.environ['GITHUB_SHA'], 'Missing/wrong built source revision'
+          PY
           xcrun simctl help bootstatus
           xcrun simctl boot "$PROOF_SIMULATOR"
           xcrun simctl bootstatus "$PROOF_SIMULATOR" -b
@@ -65,15 +76,39 @@ jobs:
           xcrun simctl launch "$PROOF_SIMULATOR" org.currencycamera.visionproof
           xcrun simctl get_app_container "$PROOF_SIMULATOR" org.currencycamera.visionproof data > "$RUNNER_TEMP/container-path"
           python3 - <<'PY'
-          import hashlib, json, os, plistlib, time
+          import hashlib, json, os, plistlib, subprocess, time
           from pathlib import Path
           temp = Path(os.environ['RUNNER_TEMP'])
           identity = os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
           result_path = Path((temp / 'container-path').read_text().strip()) / 'Documents' / ('result-' + identity + '.json')
+          progress_path = result_path.with_name('progress-' + identity + '.json')
           deadline = time.monotonic() + 180
-          while not result_path.exists():
-              assert time.monotonic() < deadline, 'iOS result missing; launch is not inference success'
+          last_progress = None
+          while not result_path.exists() and time.monotonic() < deadline:
+              if progress_path.exists():
+                  assert progress_path.stat().st_size < 8192, 'Oversized progress record'
+                  progress = json.loads(progress_path.read_text())
+                  assert progress['runIdentity'] == identity, 'Wrong progress invocation'
+                  if progress != last_progress:
+                      print('CURRENCY_CAMERA_APP_PROGRESS ' + json.dumps(progress), flush=True)
+                      last_progress = progress
               time.sleep(1)
+          if not result_path.exists():
+              # Only this ephemeral test app's process/logs; no general environment dump.
+              processes = subprocess.run(['ps', '-axo', 'pid,etime,state,comm'], capture_output=True, text=True, timeout=10)
+              print('CURRENCY_CAMERA_APP_PROCESS ' + '\n'.join(line for line in processes.stdout.splitlines() if line.rstrip().endswith('/VisionProof')))
+              simulator = os.environ['PROOF_SIMULATOR']
+              try:
+                  diagnostic = subprocess.run(['xcrun', 'simctl', 'spawn', simulator, 'log', 'show', '--last', '5m', '--style', 'compact', '--predicate', 'process == "VisionProof"'], capture_output=True, text=True, timeout=20)
+                  print('CURRENCY_CAMERA_APP_LOG ' + diagnostic.stdout[-40000:])
+              except subprocess.TimeoutExpired:
+                  print('CURRENCY_CAMERA_APP_LOG timed out')
+              crash_roots = [Path.home() / 'Library/Logs/DiagnosticReports', Path.home() / 'Library/Developer/CoreSimulator/Devices' / simulator / 'data/Library/Logs/CrashReporter']
+              for crash_root in crash_roots:
+                  for crash in sorted(crash_root.glob('VisionProof*'), key=lambda p: p.stat().st_mtime, reverse=True)[:2]:
+                      if crash.is_file():
+                          print('CURRENCY_CAMERA_APP_CRASH ' + crash.name + '\n' + crash.read_text(errors='replace')[:40000])
+              raise AssertionError('iOS result missing; launch is not inference success')
           assert result_path.stat().st_size < 4_000_000, 'iOS result exceeds log cap'
           ios = json.loads(result_path.read_text())
           print('CURRENCY_CAMERA_IOS_JSON_BEGIN')
