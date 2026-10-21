@@ -164,7 +164,9 @@ func selfTest() throws {
 if CommandLine.arguments.dropFirst().first == "--self-test" {
     try selfTest(); print("Synthetic PDF orientation, rotated page and OCR coordinate checks passed")
 } else {
-    try require(CommandLine.arguments.count == 2, "Pass sources.json or --self-test")
+    let highDetail = CommandLine.arguments.count == 3 && CommandLine.arguments[2] == "--high-detail"
+    try require(CommandLine.arguments.count == 2 || highDetail, "Pass sources.json [--high-detail] or --self-test")
+    let renderScale = highDetail ? 2 : 1
     let sources = try JSONDecoder().decode([Source].self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
     try require(sources.count == 3 && Set(sources.map(\.id)).count == 3, "Expected three distinct frozen sources")
     let defaultRequest = VNRecognizeTextRequest()
@@ -178,16 +180,17 @@ if CommandLine.arguments.dropFirst().first == "--self-test" {
         let (data, response) = try await URLSession.shared.data(for: request)
         try require((response as? HTTPURLResponse)?.statusCode == 200 && data.count < 25_000_000, "Public PDF fetch failed")
         try require(hash(data) == source.sha256, "Public PDF changed; frozen hash mismatch for \(source.id)")
-        let (image, rendered) = try render(data, pageNumber: source.page, width: source.width, height: source.height)
+        let (image, rendered) = try render(data, pageNumber: source.page, width: source.width * renderScale, height: source.height * renderScale)
         let (config, lines) = try recognize(image)
         results.append(["id": source.id, "url": source.url.absoluteString, "sourceSha256": hash(data),
                         "page": source.page, "render": rendered, "request": config, "lines": lines])
     }
     let result: [String: Any] = ["scope": "macOS static public-PDF OCR only; not an iPhone/camera performance result",
+                               "renderScale": renderScale,
                                "sdkLanguageDefaults": sdkLanguageDefaults, "defaultsCapturedBeforePdfDownload": true,
                                "macOS": ProcessInfo.processInfo.operatingSystemVersionString,
                                "sourceRevision": ProcessInfo.processInfo.environment["GITHUB_SHA"] ?? "local", "pages": results]
     let bytes = try jsonData(result)
-    try require(bytes.count < 2_000_000, "JSON exceeds log cap")
+    try require(bytes.count < 4_000_000, "JSON exceeds log cap")
     FileHandle.standardOutput.write(bytes)
 }

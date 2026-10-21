@@ -24,7 +24,7 @@ jobs:
           "$RUNNER_TEMP/vision-menu" --self-test
       - name: Read the three frozen public menus
         run: |
-          "$RUNNER_TEMP/vision-menu" sources.json > "$RUNNER_TEMP/vision-results.json"
+          "$RUNNER_TEMP/vision-menu" sources.json --high-detail > "$RUNNER_TEMP/vision-results.json"
           echo CURRENCY_CAMERA_VISION_JSON_BEGIN
           cat "$RUNNER_TEMP/vision-results.json"
           printf '\nCURRENCY_CAMERA_VISION_JSON_END\n'
