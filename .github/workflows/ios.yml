@@ -51,7 +51,22 @@ jobs:
           printf '\nCURRENCY_CAMERA_MAC_JSON_END\n'
       - name: Build the Simulator app without account or provisioning changes
         run: |
-          if ! xcodebuild -project VisionProof.xcodeproj -scheme VisionProof -configuration Release -sdk iphonesimulator -destination "platform=iOS Simulator,id=$PROOF_SIMULATOR" -derivedDataPath "$RUNNER_TEMP/derived" "INFOPLIST_KEY_ProofSourceRevision=$GITHUB_SHA" "INFOPLIST_KEY_ProofRunIdentity=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" build > "$RUNNER_TEMP/build.log" 2>&1; then
+          python3 - <<'PY'
+          import os, plistlib
+          from pathlib import Path
+          # Explicit input plist: custom INFOPLIST_KEY settings were not embedded by Xcode.
+          metadata = {
+              'CFBundleInfoDictionaryVersion': '6.0', 'CFBundleIdentifier': 'org.currencycamera.visionproof',
+              'CFBundleExecutable': 'VisionProof', 'CFBundleName': 'VisionProof', 'CFBundlePackageType': 'APPL',
+              'CFBundleVersion': '1', 'CFBundleShortVersionString': '1.0', 'LSRequiresIPhoneOS': True,
+              'UIDeviceFamily': [1], 'UILaunchScreen': {}, 'UISupportedInterfaceOrientations': ['UIInterfaceOrientationPortrait'],
+              'ProofSourceRevision': os.environ['GITHUB_SHA'],
+              'ProofRunIdentity': os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'],
+          }
+          with (Path(os.environ['RUNNER_TEMP']) / 'proof-info.plist').open('xb') as output:
+              plistlib.dump(metadata, output, fmt=plistlib.FMT_XML)
+          PY
+          if ! xcodebuild -project VisionProof.xcodeproj -scheme VisionProof -configuration Release -sdk iphonesimulator -destination "platform=iOS Simulator,id=$PROOF_SIMULATOR" -derivedDataPath "$RUNNER_TEMP/derived" GENERATE_INFOPLIST_FILE=NO "INFOPLIST_FILE=$RUNNER_TEMP/proof-info.plist" build > "$RUNNER_TEMP/build.log" 2>&1; then
             tail -n 200 "$RUNNER_TEMP/build.log"
             exit 1
           fi
