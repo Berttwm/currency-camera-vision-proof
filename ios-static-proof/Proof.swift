@@ -1,0 +1,228 @@
+import Foundation
+import Vision
+import CoreGraphics
+import CoreText
+import PDFKit
+import CryptoKit
+
+struct Source: Codable {
+    let id: String, url: URL, sha256: String
+    let page: Int, width: Int, height: Int
+}
+struct ProofError: Error, CustomStringConvertible { let description: String }
+func require(_ valid: Bool, _ message: String) throws {
+    if !valid { throw ProofError(description: message) }
+}
+func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+func supportsLanguages(_ requested: [String], _ available: [String]) -> Bool {
+    let canonical: (String) -> String = { Locale.canonicalLanguageIdentifier(from: $0) }
+    return Set(requested.map(canonical)).isSubset(of: Set(available.map(canonical)))
+}
+func jsonData(_ value: [String: Any]) throws -> Data {
+    let pretty = try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
+    let lines = String(decoding: pretty, as: UTF8.self).components(separatedBy: "\n")
+    let unindented = lines.map { $0.trimmingCharacters(in: .whitespaces) }
+    return Data(unindented.joined(separator: "\n").utf8)
+}
+func rectJSON(_ r: CGRect) -> [String: Double] {
+    ["x0": Double(r.minX), "y0": Double(r.minY), "x1": Double(r.maxX), "y1": Double(r.maxY)]
+}
+func topLeft(_ r: CGRect, _ width: Int, _ height: Int) -> CGRect {
+    CGRect(x: r.minX * CGFloat(width), y: (1-r.maxY) * CGFloat(height),
+           width: r.width * CGFloat(width), height: r.height * CGFloat(height))
+}
+func quadJSON(_ box: VNRectangleObservation, _ width: Int, _ height: Int) -> [[String: Double]] {
+    let points: [CGPoint] = [box.topLeft, box.topRight, box.bottomRight, box.bottomLeft]
+    return points.map { point -> [String: Double] in
+        let x: Double = Double(point.x) * Double(width)
+        let y: Double = (1.0 - Double(point.y)) * Double(height)
+        return ["x": x, "y": y]
+    }
+}
+func render(_ data: Data, pageNumber: Int, width: Int, height: Int) throws -> (CGImage, [String: Any]) {
+    guard let provider = CGDataProvider(data: data as CFData),
+          let document = CGPDFDocument(provider), let page = document.page(at: pageNumber),
+          let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                                  bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { throw ProofError(description: "Cannot open page or allocate bitmap") }
+    let bounds = CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
+    let box = page.getBoxRect(.cropBox).intersection(page.getBoxRect(.mediaBox))
+    let rotated = abs(Int(page.rotationAngle)) % 180 == 90
+    let displayWidth = rotated ? box.height : box.width
+    let displayHeight = rotated ? box.width : box.height
+    try require(displayWidth > 0 && displayHeight > 0, "Invalid page dimensions")
+    try require(abs(Double(width)/Double(height) - Double(displayWidth/displayHeight)) < 0.003, "Manifest/page aspect mismatch")
+    context.setFillColor(CGColor(gray: 1, alpha: 1)); context.fill(bounds)
+    context.clip(to: bounds)
+    // Quartz's PDF fitting transform only reduces pages; map to a unit rect, then enlarge explicitly.
+    let edge = CGFloat(max(width, height))
+    let unitRect = CGRect(x: 0, y: 0, width: bounds.width/edge, height: bounds.height/edge)
+    let pdfTransform = page.getDrawingTransform(.cropBox, rect: unitRect, rotate: 0, preserveAspectRatio: true)
+    context.scaleBy(x: edge, y: edge)
+    context.concatenate(pdfTransform)
+    let drawingTransform = context.ctm
+    context.drawPDFPage(page)
+    guard let image = context.makeImage(), let bytes = context.data else { throw ProofError(description: "Cannot make rendered image") }
+    return (image, ["width": width, "height": height, "rotation": page.rotationAngle,
+                    "cropBox": rectJSON(box), "renderer": "Quartz; differs from Poppler",
+                    "drawingTransform": ["a": Double(drawingTransform.a), "b": Double(drawingTransform.b),
+                                         "c": Double(drawingTransform.c), "d": Double(drawingTransform.d),
+                                         "tx": Double(drawingTransform.tx), "ty": Double(drawingTransform.ty)],
+                    "pixelFormat": "RGBA8-premultiplied-last", "bytesPerRow": width*4,
+                    "pixelSha256": hash(Data(bytes: bytes, count: width*height*4))])
+}
+func recognize(_ image: CGImage) throws -> ([String: Any], [[String: Any]]) {
+    let request = VNRecognizeTextRequest()
+    request.revision = VNRecognizeTextRequestRevision3
+    request.recognitionLevel = .accurate
+    request.minimumTextHeight = 0
+    // Uniform baseline: leave the SDK's language selection and correction settings untouched.
+    let languages = request.recognitionLanguages
+    let automaticLanguage = request.automaticallyDetectsLanguage
+    let languageCorrection = request.usesLanguageCorrection
+    let supported = try request.supportedRecognitionLanguages()
+    try require(supportsLanguages(languages, supported), "Default language unavailable; no silent substitution. Defaults=\(languages); supported=\(supported); automatic=\(automaticLanguage); correction=\(languageCorrection)")
+    let started = Date()
+    try VNImageRequestHandler(cgImage: image, orientation: .up, options: [:]).perform([request])
+    let regex = try NSRegularExpression(pattern: #"\S+"#)
+    var lines: [[String: Any]] = []
+    for observation in request.results ?? [] {
+        guard let candidate = observation.topCandidates(1).first else {
+            lines.append(["error": "Observation has no candidate"]); continue
+        }
+        let text = candidate.string
+        var words: [[String: Any]] = []
+        for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+            guard let range = Range(match.range, in: text) else { throw ProofError(description: "Invalid UTF16 range") }
+            var word: [String: Any] = ["text": String(text[range]), "startUTF16": match.range.location,
+                                      "lengthUTF16": match.range.length, "confidence": candidate.confidence,
+                                      "confidenceScope": "line-top-candidate"]
+            do {
+                if let box = try candidate.boundingBox(for: range) {
+                    word["bbox"] = rectJSON(topLeft(box.boundingBox, image.width, image.height))
+                    word["normalizedBox"] = rectJSON(box.boundingBox)
+                    word["quad"] = quadJSON(box, image.width, image.height)
+                } else { word["geometryError"] = "No substring box" }
+            } catch { word["geometryError"] = String(describing: error) }
+            words.append(word)
+        }
+        lines.append(["text": text, "confidence": candidate.confidence,
+                      "normalizedBox": rectJSON(observation.boundingBox),
+                      "quad": quadJSON(observation, image.width, image.height),
+                      "bbox": rectJSON(topLeft(observation.boundingBox, image.width, image.height)), "words": words])
+    }
+    return (["revision": request.revision, "recognitionLevel": "accurate", "automaticallyDetectsLanguage": automaticLanguage,
+             "usesLanguageCorrection": languageCorrection, "minimumTextHeight": request.minimumTextHeight,
+             "languagePolicy": "SDK defaults; captured before recognition",
+             "languages": languages, "supportedLanguages": supported,
+             "geometryPrecision": "vision-word-approximate", "confidenceScale": "native 0..1; uncalibrated",
+             "recognitionMs": Date().timeIntervalSince(started) * 1000], lines)
+}
+func selfTest() throws {
+    func checkedRender(_ data: Data, pageNumber: Int, width: Int, height: Int) throws -> (CGImage, [String: Any]) {
+        let (image, info) = try render(data, pageNumber: pageNumber, width: width, height: height)
+        guard let pixels = image.dataProvider?.data, let expected = info["pixelSha256"] as? String else {
+            throw ProofError(description: "No synthetic pixels")
+        }
+        return (try rawImage(pixels as Data, width: width, height: height, stride: width * 4, expectedHash: expected), info)
+    }
+    try require(supportsLanguages(["en_US"], ["en-US"]), "Equivalent language identifiers rejected")
+    try require(!supportsLanguages(["en_AU"], ["en-US"]) && !supportsLanguages(["de-DE"], ["en-US"]), "Unsupported language accepted")
+    let sample = "  quoted \"value\" \n café  "
+    let sampleData = try jsonData(["text": sample])
+    let roundTrip = try JSONSerialization.jsonObject(with: sampleData) as? [String: String]
+    try require(roundTrip?["text"] == sample, "JSON formatting changed recognized text")
+    let output = NSMutableData()
+    var media = CGRect(x: 0, y: 0, width: 600, height: 400)
+    guard let consumer = CGDataConsumer(data: output as CFMutableData), let pdf = CGContext(consumer: consumer, mediaBox: &media, nil)
+    else { throw ProofError(description: "Cannot create test PDF") }
+    pdf.beginPDFPage(nil)
+    pdf.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1)); pdf.fill(CGRect(x: 0, y: 360, width: 40, height: 40))
+    pdf.setFillColor(CGColor(red: 0, green: 0, blue: 1, alpha: 1)); pdf.fill(CGRect(x: 560, y: 0, width: 40, height: 40))
+    for (text, point) in [("TOP USD 12.50", CGPoint(x: 60, y: 330)), ("BOTTOM USD 7.25", CGPoint(x: 260, y: 40))] {
+        let attributed = NSAttributedString(string: text, attributes: [NSAttributedString.Key(kCTFontAttributeName as String): CTFontCreateWithName("Helvetica" as CFString, 28, nil)])
+        pdf.textPosition = point; CTLineDraw(CTLineCreateWithAttributedString(attributed), pdf)
+    }
+    pdf.endPDFPage(); pdf.closePDF()
+    let original = output as Data
+    let (enlarged, enlargedInfo) = try checkedRender(original, pageNumber: 1, width: 1200, height: 800)
+    guard let enlargedBytes = enlarged.dataProvider?.data, let enlargedPointer = CFDataGetBytePtr(enlargedBytes)
+    else { throw ProofError(description: "No enlarged pixels") }
+    let corner = 40*enlarged.bytesPerRow + 40*4, opposite = 760*enlarged.bytesPerRow + 1160*4
+    try require(enlargedPointer[corner] > 240 && enlargedPointer[corner+2] < 20 && enlargedPointer[opposite] < 20 && enlargedPointer[opposite+2] > 240,
+                "PDF enlargement failed; transform=\(enlargedInfo["drawingTransform"]!)")
+    let (image, _) = try checkedRender(original, pageNumber: 1, width: 600, height: 400)
+    let (_, lines) = try recognize(image)
+    for (value, isTop) in [("12.50", true), ("7.25", false)] {
+        guard let line = lines.first(where: { ($0["text"] as? String)?.contains(value) == true }),
+              let box = line["bbox"] as? [String: Double], let y0 = box["y0"], let y1 = box["y1"]
+        else { throw ProofError(description: "Synthetic OCR failed for \(value)") }
+        try require(((y0+y1)/2 < 200) == isTop, "Vertical origin is incorrect")
+    }
+    guard let rotatedPDF = PDFDocument(data: original), let page = rotatedPDF.page(at: 0) else { throw ProofError(description: "Cannot reopen test PDF") }
+    page.rotation = 90
+    guard let rotatedData = rotatedPDF.dataRepresentation() else { throw ProofError(description: "Cannot rotate test PDF") }
+    let (rotated, _) = try checkedRender(rotatedData, pageNumber: 1, width: 400, height: 600)
+    guard let bytes = rotated.dataProvider?.data, let pointer = CFDataGetBytePtr(bytes) else { throw ProofError(description: "No rotated pixels") }
+    let red = 20*rotated.bytesPerRow + 380*4, blue = 580*rotated.bytesPerRow + 20*4
+    try require(pointer[red] > 240 && pointer[red+2] < 20 && pointer[blue] < 20 && pointer[blue+2] > 240, "PDF rotation is incorrect")
+}
+
+func languageDefaults() -> [String: Any] {
+    let request = VNRecognizeTextRequest()
+    return ["languages": request.recognitionLanguages,
+            "automaticallyDetectsLanguage": request.automaticallyDetectsLanguage,
+            "usesLanguageCorrection": request.usesLanguageCorrection]
+}
+
+func rawImage(_ pixels: Data, width: Int, height: Int, stride: Int, expectedHash: String) throws -> CGImage {
+    try require(width > 0 && height > 0 && width <= 2600 && height <= 2600 && stride == width * 4, "Invalid raw dimensions")
+    try require(pixels.count == stride * height && hash(pixels) == expectedHash, "Raw input byte identity failed")
+    guard let provider = CGDataProvider(data: pixels as CFData),
+          let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                              bytesPerRow: stride, space: CGColorSpaceCreateDeviceRGB(),
+                              bitmapInfo: CGBitmapInfo(rawValue: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue),
+                              provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
+          let roundTrip = image.dataProvider?.data else { throw ProofError(description: "Cannot reconstruct pixels") }
+    try require(hash(roundTrip as Data) == expectedHash, "Reconstructed byte identity failed")
+    return image
+}
+
+// Both platforms read these exact runner-generated bytes; UIKit never resizes a menu.
+func recognizeInputs(_ directory: URL, defaults: [String: Any], platform: String) throws -> [String: Any] {
+    let data = try Data(contentsOf: directory.appendingPathComponent("inputs.json"))
+    let sources = try JSONDecoder().decode([Source].self, from: Data(contentsOf: directory.appendingPathComponent("sources.json")))
+    guard let input = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let pages = input["pages"] as? [[String: Any]], let runIdentity = input["runIdentity"] as? String else { throw ProofError(description: "Invalid inputs") }
+    try require(runIdentity.range(of: #"^\d+-\d+$"#, options: .regularExpression) != nil, "Invalid run identity")
+    try require(input["renderScale"] as? Int == 2 && input["colorSpace"] as? String == "DeviceRGB", "Unexpected pixel policy")
+    try require(pages.count == 3 && sources.count == 3 && Set(pages.compactMap { $0["id"] as? String }).count == 3, "Expected three distinct inputs")
+    var results: [[String: Any]] = []
+    for page in pages {
+        guard let id = page["id"] as? String, let source = sources.first(where: { $0.id == id }),
+              let info = page["render"] as? [String: Any], let width = info["width"] as? Int,
+              let height = info["height"] as? Int, let stride = info["bytesPerRow"] as? Int,
+              let expected = info["pixelSha256"] as? String else { throw ProofError(description: "Incomplete input") }
+        try require(id.range(of: #"^[a-z0-9-]+$"#, options: .regularExpression) != nil, "Invalid input id")
+        try require(page["url"] as? String == source.url.absoluteString && page["sourceSha256"] as? String == source.sha256 && page["page"] as? Int == source.page, "Source identity mismatch")
+        try require(width > 0 && height > 0 && max(width, height) == 2600 && width == source.width * 2 && height == source.height * 2 && stride == width * 4, "Unexpected dimensions")
+        try require(info["pixelFormat"] as? String == "RGBA8-premultiplied-last", "Unexpected pixel layout")
+        let pixels = try Data(contentsOf: directory.appendingPathComponent(id + ".rgba"))
+        let image = try rawImage(pixels, width: width, height: height, stride: stride, expectedHash: expected)
+        let (config, lines) = try recognize(image)
+        for key in ["languages", "automaticallyDetectsLanguage", "usesLanguageCorrection"] {
+            try require(NSDictionary(dictionary: [key: config[key]!]).isEqual(to: [key: defaults[key]!]), "SDK defaults changed during run")
+        }
+        var result = page
+        result["request"] = config; result["lines"] = lines
+        result["inputBytesVerified"] = true
+        results.append(result)
+    }
+    return ["complete": true, "scope": "Static identical-pixel comparison; no camera or physical-device result",
+            "platform": platform, "operatingSystem": ProcessInfo.processInfo.operatingSystemVersionString,
+            "sourceRevision": ProcessInfo.processInfo.environment["GITHUB_SHA"] ?? Bundle.main.object(forInfoDictionaryKey: "ProofSourceRevision") as? String ?? "local",
+            "runIdentity": runIdentity, "inputManifestSha256": hash(data),
+            "renderScale": 2, "colorSpace": "DeviceRGB", "defaultsCapturedBeforeInputRead": true,
+            "sdkLanguageDefaults": defaults, "pages": results]
+}

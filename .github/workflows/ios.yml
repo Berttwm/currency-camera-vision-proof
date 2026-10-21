@@ -1,0 +1,103 @@
+name: Identical-pixel Mac and iOS Simulator proof
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    if: ${{ github.event.repository.visibility == 'public' }}
+    runs-on: macos-26
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ios-static-proof
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Record actual host and installed Simulator inventory
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version
+          xcrun swiftc --version
+          xcrun simctl list --json > "$RUNNER_TEMP/simulators.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          inventory = json.loads(Path(os.environ['RUNNER_TEMP'], 'simulators.json').read_text())
+          choices = []
+          for runtime in inventory['runtimes']:
+              if not runtime.get('isAvailable') or not runtime['identifier'].startswith('com.apple.CoreSimulator.SimRuntime.iOS-'):
+                  continue
+              version = tuple(map(int, runtime['version'].split('.')))
+              if version[0] != 26:
+                  continue
+              for device in inventory['devices'].get(runtime['identifier'], []):
+                  if device.get('isAvailable') and device['name'].startswith('iPhone') and device['state'] == 'Shutdown':
+                      choices.append((version, device['name'] == 'iPhone 17', runtime, device))
+          assert choices, 'No available installed iOS26 iPhone Simulator; do not download or pay'
+          _, _, runtime, device = max(choices, key=lambda x: (x[0], x[1], x[3]['name']))
+          print(json.dumps({'runtime': runtime, 'device': device}, indent=2))
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('PROOF_SIMULATOR=' + device['udid'] + '\n')
+          PY
+      - name: Render public PDFs once and read the exact bytes on Mac
+        run: |
+          xcrun swiftc -O -swift-version 5 -target "$(uname -m)-apple-macosx13.0" -framework Vision -framework CoreGraphics -framework CoreText -framework PDFKit -framework CryptoKit main.swift Proof.swift -o "$RUNNER_TEMP/mac-proof"
+          "$RUNNER_TEMP/mac-proof" "$PWD/Inputs" > "$RUNNER_TEMP/mac-result.json"
+          echo CURRENCY_CAMERA_MAC_JSON_BEGIN
+          cat "$RUNNER_TEMP/mac-result.json"
+          printf '\nCURRENCY_CAMERA_MAC_JSON_END\n'
+      - name: Build the Simulator app without account or provisioning changes
+        run: |
+          if ! xcodebuild -project VisionProof.xcodeproj -scheme VisionProof -configuration Release -sdk iphonesimulator -destination "platform=iOS Simulator,id=$PROOF_SIMULATOR" -derivedDataPath "$RUNNER_TEMP/derived" "INFOPLIST_KEY_ProofSourceRevision=$GITHUB_SHA" "INFOPLIST_KEY_ProofRunIdentity=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" build > "$RUNNER_TEMP/build.log" 2>&1; then
+            tail -n 200 "$RUNNER_TEMP/build.log"
+            exit 1
+          fi
+          tail -n 20 "$RUNNER_TEMP/build.log"
+      - name: Run iOS inference and verify identical menu bytes
+        run: |
+          xcrun simctl help bootstatus
+          xcrun simctl boot "$PROOF_SIMULATOR"
+          xcrun simctl bootstatus "$PROOF_SIMULATOR" -b
+          xcrun simctl install "$PROOF_SIMULATOR" "$RUNNER_TEMP/derived/Build/Products/Release-iphonesimulator/VisionProof.app"
+          xcrun simctl launch "$PROOF_SIMULATOR" org.currencycamera.visionproof
+          xcrun simctl get_app_container "$PROOF_SIMULATOR" org.currencycamera.visionproof data > "$RUNNER_TEMP/container-path"
+          python3 - <<'PY'
+          import hashlib, json, os, plistlib, time
+          from pathlib import Path
+          temp = Path(os.environ['RUNNER_TEMP'])
+          identity = os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
+          result_path = Path((temp / 'container-path').read_text().strip()) / 'Documents' / ('result-' + identity + '.json')
+          deadline = time.monotonic() + 180
+          while not result_path.exists():
+              assert time.monotonic() < deadline, 'iOS result missing; launch is not inference success'
+              time.sleep(1)
+          assert result_path.stat().st_size < 4_000_000, 'iOS result exceeds log cap'
+          ios = json.loads(result_path.read_text())
+          print('CURRENCY_CAMERA_IOS_JSON_BEGIN')
+          print(result_path.read_text())
+          print('CURRENCY_CAMERA_IOS_JSON_END')
+          assert ios.get('complete') is True, ios
+          assert ios['platform'] == 'iOS Simulator' and ios['operatingSystem'].startswith('Version 26.'), 'Wrong runtime'
+          assert ios['sourceRevision'] == os.environ['GITHUB_SHA'], 'Wrong app source revision'
+          mac = json.loads((temp / 'mac-result.json').read_text())
+          assert mac['runIdentity'] == ios['runIdentity'] == identity, 'Stale/wrong invocation'
+          assert mac['inputManifestSha256'] == ios['inputManifestSha256'] == hashlib.sha256(Path('Inputs/inputs.json').read_bytes()).hexdigest()
+          plist = plistlib.loads((temp / 'derived/Build/Products/Release-iphonesimulator/VisionProof.app/Info.plist').read_bytes())
+          assert plist['CFBundleVersion'] == '1' and plist['CFBundleShortVersionString'] == '1.0'
+          assert plist['ProofRunIdentity'] == identity and plist['ProofSourceRevision'] == os.environ['GITHUB_SHA']
+          assert mac['complete'] is True and len(mac['pages']) == len(ios['pages']) == 3
+          assert mac['colorSpace'] == ios['colorSpace'] == 'DeviceRGB'
+          for a, b in zip(mac['pages'], ios['pages']):
+              assert a['id'] == b['id'] and a['render'] == b['render'], 'Pixel metadata differs'
+              assert a['inputBytesVerified'] is True and b['inputBytesVerified'] is True
+          print('Same raw RGBA8 bytes verified on both platforms. Static result only; accuracy is scored separately.')
+          PY
+      - name: Stop the ephemeral Simulator
+        if: always()
+        run: |
+          if [ -n "${PROOF_SIMULATOR:-}" ]; then
+            xcrun simctl shutdown "$PROOF_SIMULATOR" || true
+          fi
