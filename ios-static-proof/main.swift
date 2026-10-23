@@ -5,8 +5,7 @@ if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--documents"
     if #available(macOS 26.0, *) {
         let result = try await documentProbe(directory, platform: "macOS")
         let bytes = try jsonData(result)
-        let baseline = try Data(contentsOf: directory.appendingPathComponent("baseline-mac.json"))
-        try require(baseline.count + bytes.count < 4_000_000, "Combined Mac baseline/document JSON exceeds log cap")
+        try require(bytes.count < 16_000_000, "Decoded Mac document JSON exceeds16MB: \(bytes.count)")
         FileHandle.standardOutput.write(bytes)
     } else { throw ProofError(description: "Document probe requires macOS26") }
     exit(0)

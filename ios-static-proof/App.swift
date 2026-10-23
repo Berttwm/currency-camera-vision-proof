@@ -48,7 +48,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                 do {
                     let diagnostic = try await documentProbe(inputs, platform: "iOS Simulator")
                     let documentBytes = try jsonData(diagnostic)
-                    try require(bytes.count + documentBytes.count < 4_000_000, "Combined iOS baseline/document JSON exceeds log cap")
+                    try require(documentBytes.count < 16_000_000, "Decoded iOS document JSON exceeds16MB: \(documentBytes.count)")
                     try documentBytes.write(to: documentDestination, options: .atomic)
                     progress("document-probe-complete")
                 } catch {

@@ -52,9 +52,21 @@ jobs:
       - name: Read separate document layout on Mac after preserving baseline
         run: |
           "$RUNNER_TEMP/mac-proof" --documents "$PWD/Inputs" > "$RUNNER_TEMP/mac-document.json"
-          echo CURRENCY_CAMERA_DOCUMENT_MAC_JSON_BEGIN
-          cat "$RUNNER_TEMP/mac-document.json"
-          printf '\nCURRENCY_CAMERA_DOCUMENT_MAC_JSON_END\n'
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, os
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP']) / 'mac-document.json'
+          assert path.stat().st_size < 16_000_000, 'Decoded Mac document limit'
+          data = path.read_bytes()
+          encoded = base64.b64encode(gzip.compress(data, mtime=0)).decode('ascii')
+          envelope = {'encoding': 'gzip+base64', 'decodedBytes': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
+                      'base64': [encoded[i:i+4096] for i in range(0, len(encoded), 4096)]}
+          wire = json.dumps(envelope, indent=2)
+          assert len(wire.encode('utf8')) + Path('Inputs/baseline-mac.json').stat().st_size < 4_000_000, 'Combined Mac wire limit'
+          print('CURRENCY_CAMERA_DOCUMENT_MAC_JSON_BEGIN')
+          print(wire)
+          print('CURRENCY_CAMERA_DOCUMENT_MAC_JSON_END')
+          PY
       - name: Build the Simulator app without account or provisioning changes
         run: |
           python3 - <<'PY'
@@ -97,7 +109,7 @@ jobs:
           xcrun simctl launch "$PROOF_SIMULATOR" org.currencycamera.visionproof
           xcrun simctl get_app_container "$PROOF_SIMULATOR" org.currencycamera.visionproof data > "$RUNNER_TEMP/container-path"
           python3 - <<'PY'
-          import hashlib, json, os, plistlib, subprocess, time
+          import base64, gzip, hashlib, json, os, plistlib, subprocess, time
           from pathlib import Path
           temp = Path(os.environ['RUNNER_TEMP'])
           identity = os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
@@ -154,11 +166,17 @@ jobs:
           while not document_path.exists() and time.monotonic() < deadline:
               time.sleep(1)
           assert document_path.exists(), 'Document diagnostic timed out; baseline output above remains preserved'
-          assert document_path.stat().st_size + result_path.stat().st_size < 4_000_000, 'Combined iOS JSON exceeds log cap'
+          assert document_path.stat().st_size < 16_000_000, 'Decoded iOS document limit'
+          data = document_path.read_bytes()
+          encoded = base64.b64encode(gzip.compress(data, mtime=0)).decode('ascii')
+          envelope = {'encoding': 'gzip+base64', 'decodedBytes': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
+                      'base64': [encoded[i:i+4096] for i in range(0, len(encoded), 4096)]}
+          wire = json.dumps(envelope, indent=2)
+          assert len(wire.encode('utf8')) + result_path.stat().st_size < 4_000_000, 'Combined iOS wire limit'
           print('CURRENCY_CAMERA_DOCUMENT_IOS_JSON_BEGIN')
-          print(document_path.read_text())
+          print(wire)
           print('CURRENCY_CAMERA_DOCUMENT_IOS_JSON_END')
-          diagnostic = json.loads(document_path.read_text())
+          diagnostic = json.loads(data)
           assert 'error' not in diagnostic, diagnostic
           assert diagnostic['runIdentity'] == identity and diagnostic['sourceRevision'] == os.environ['GITHUB_SHA']
           assert diagnostic['inputManifestSha256'] == ios['inputManifestSha256']
