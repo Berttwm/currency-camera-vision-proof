@@ -1,5 +1,16 @@
 import Foundation
 
+if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--documents" {
+    let directory = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
+    if #available(macOS 26.0, *) {
+        let result = try await documentProbe(directory, platform: "macOS")
+        let bytes = try jsonData(result)
+        let baseline = try Data(contentsOf: directory.appendingPathComponent("baseline-mac.json"))
+        try require(baseline.count + bytes.count < 4_000_000, "Combined Mac baseline/document JSON exceeds log cap")
+        FileHandle.standardOutput.write(bytes)
+    } else { throw ProofError(description: "Document probe requires macOS26") }
+    exit(0)
+}
 try require(CommandLine.arguments.count == 2, "Pass a new output directory")
 try selfTest()
 let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
@@ -29,11 +40,15 @@ for source in sources {
 guard let run = ProcessInfo.processInfo.environment["GITHUB_RUN_ID"], let attempt = ProcessInfo.processInfo.environment["GITHUB_RUN_ATTEMPT"] else {
     throw ProofError(description: "Missing workflow run identity")
 }
-try jsonData(["runIdentity": run + "-" + attempt, "renderScale": 2, "colorSpace": "DeviceRGB", "pages": inputs]).write(to: output.appendingPathComponent("inputs.json"), options: .atomic)
+let (controlImage, controlInfo) = try documentControl()
+guard let controlPixels = controlImage.dataProvider?.data else { throw ProofError(description: "No document control pixels") }
+try (controlPixels as Data).write(to: output.appendingPathComponent("synthetic-document-control.rgba"), options: .atomic)
+try jsonData(["runIdentity": run + "-" + attempt, "renderScale": 2, "colorSpace": "DeviceRGB", "pages": inputs, "documentControl": controlInfo]).write(to: output.appendingPathComponent("inputs.json"), options: .atomic)
 var result = try recognizeInputs(output, defaults: defaults, platform: "macOS")
 if #available(macOS 26.0, *) {
     result["semanticProbe"] = await semanticProbe(result)
 } else { throw ProofError(description: "String semantic probe requires macOS26") }
 let bytes = try jsonData(result)
 try require(bytes.count < 4_000_000, "Mac JSON exceeds log cap")
+try bytes.write(to: output.appendingPathComponent("baseline-mac.json"), options: .atomic)
 FileHandle.standardOutput.write(bytes)

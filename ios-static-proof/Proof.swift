@@ -268,3 +268,154 @@ func semanticProbe(_ result: [String: Any]) async -> [String: Any] {
             "locale": Locale.current.identifier, "currencyWarning": "Detected currency may be a best guess; never substitutes for selected currency",
             "elapsedMs": Date().timeIntervalSince(started) * 1000, "records": records]
 }
+
+// Separate layout diagnostic. It never supplies price labels to the baseline parser.
+func documentControl() throws -> (CGImage, [String: Any]) {
+    let data = NSMutableData()
+    var media = CGRect(x: 0, y: 0, width: 600, height: 400)
+    guard let consumer = CGDataConsumer(data: data as CFMutableData),
+          let pdf = CGContext(consumer: consumer, mediaBox: &media, nil) else { throw ProofError(description: "Cannot create document control") }
+    pdf.beginPDFPage(nil)
+    pdf.setFillColor(CGColor(gray: 1, alpha: 1)); pdf.fill(media)
+    pdf.setStrokeColor(CGColor(gray: 0, alpha: 1)); pdf.setLineWidth(1)
+    for x in [30, 280, 420, 570] { pdf.move(to: CGPoint(x: x, y: 130)); pdf.addLine(to: CGPoint(x: x, y: 320)) }
+    for y in [130, 190, 250, 320] { pdf.move(to: CGPoint(x: 30, y: y)); pdf.addLine(to: CGPoint(x: 570, y: y)) }
+    pdf.strokePath()
+    let labels: [(String, CGFloat, CGFloat)] = [
+        ("TOP CONTROL GBP 12.50", 35, 355), ("Item", 45, 280), ("Price GBP", 290, 280), ("Weight g", 430, 280),
+        ("Coffee", 45, 215), ("2.50", 295, 215), ("330", 435, 215),
+        ("Tea", 45, 155), ("3.00", 295, 155), ("250", 435, 155), ("BOTTOM CONTROL SINCE 1914", 35, 35)]
+    for (text, x, y) in labels {
+        let attributed = NSAttributedString(string: text, attributes: [NSAttributedString.Key(kCTFontAttributeName as String): CTFontCreateWithName("Helvetica" as CFString, 24, nil)])
+        pdf.textPosition = CGPoint(x: x, y: y); CTLineDraw(CTLineCreateWithAttributedString(attributed), pdf)
+    }
+    pdf.endPDFPage(); pdf.closePDF()
+    return try render(data as Data, pageNumber: 1, width: 1200, height: 800)
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+func documentRegion(_ region: NormalizedRegion, width: Int, height: Int) -> [String: Any] {
+    let points = region.normalizedPoints
+    var value: [String: Any] = ["normalizedPolygon": points.map { ["x": Double($0.x), "y": Double($0.y)] }]
+    if let x0 = points.map({ Double($0.x) }).min(), let x1 = points.map({ Double($0.x) }).max(),
+       let y0 = points.map({ Double($0.y) }).min(), let y1 = points.map({ Double($0.y) }).max() {
+        let box = CGRect(x: x0, y: y0, width: x1-x0, height: y1-y0)
+        value["normalizedBox"] = rectJSON(box); value["bbox"] = rectJSON(topLeft(box, width, height))
+    } else { value["geometryError"] = "Empty returned polygon" }
+    return value
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+func documentRead(_ image: CGImage) async throws -> [String: Any] {
+    let request = RecognizeDocumentsRequest()
+    let options = request.textRecognitionOptions
+    let config: [String: Any] = [
+        "policy": "SDK defaults; getters captured before inference; no options assigned",
+        "revision": String(describing: request.revision), "supportedRevisions": RecognizeDocumentsRequest.supportedRevisions.map { String(describing: $0) },
+        "supportedLanguages": request.supportedRecognitionLanguages.map { $0.minimalIdentifier },
+        "languages": options.recognitionLanguages.map { $0.minimalIdentifier }, "automaticallyDetectLanguage": options.automaticallyDetectLanguage,
+        "useLanguageCorrection": options.useLanguageCorrection, "customWords": options.customWords,
+        "maximumCandidateCount": options.maximumCandidateCount, "minimumTextHeightFraction": options.minimumTextHeightFraction,
+        "compute": request.supportedComputeStageDevices.map { stage, devices in
+            ["stage": String(describing: stage), "supported": devices.map { String(describing: $0) },
+             "assigned": request.computeDevice(for: stage).map { String(describing: $0) } ?? "unassigned"] as [String: Any]
+        }]
+    let started = Date()
+    let observations = try await request.perform(on: image, orientation: .up)
+    let regex = try NSRegularExpression(pattern: #"\S+"#)
+    func lineJSON(_ observation: RecognizedTextObservation, substrings: Bool) throws -> [String: Any] {
+        let candidates = observation.topCandidates(options.maximumCandidateCount)
+        var value = documentRegion(observation.boundingRegion, width: image.width, height: image.height)
+        value["text"] = observation.transcript; value["observationConfidence"] = observation.confidence
+        value["candidates"] = candidates.map { ["text": $0.string, "confidence": $0.confidence] }
+        if substrings, let candidate = candidates.first {
+            let text = candidate.string
+            var words: [[String: Any]] = []
+            for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+                guard let range = Range(match.range, in: text) else { throw ProofError(description: "Document candidate UTF16 range invalid") }
+                var word: [String: Any] = ["text": String(text[range]), "startUTF16": match.range.location, "lengthUTF16": match.range.length,
+                                           "confidence": candidate.confidence, "confidenceScope": "line-top-candidate"]
+                if let box = candidate.boundingBox(for: range) {
+                    let normalized = box.boundingBox.cgRect
+                    word["normalizedBox"] = rectJSON(normalized); word["bbox"] = rectJSON(topLeft(normalized, image.width, image.height))
+                    word["normalizedQuad"] = [box.topLeft, box.topRight, box.bottomRight, box.bottomLeft].map { ["x": Double($0.x), "y": Double($0.y)] }
+                } else { word["geometryError"] = "No returned candidate substring box" }
+                words.append(word)
+            }
+            value["words"] = words
+        }
+        return value
+    }
+    func entities(_ owner: DocumentObservation.Container.Text) -> [[String: Any]] {
+        let transcript = owner.transcript
+        let detected = owner.detectedData // Computed once per owner, never once per number.
+        return detected.map { entity in
+            var value = documentRegion(entity.boundingRegion, width: image.width, height: image.height)
+            switch entity.match.details {
+            case .moneyAmount(let money): value["kind"] = "money"; value["amount"] = NSDecimalNumber(decimal: money.amount).stringValue; value["currency"] = money.currency.identifier
+            case .measurement: value["kind"] = "measurement"
+            case .calendarEvent: value["kind"] = "calendar"
+            case .phoneNumber: value["kind"] = "phone"
+            default: value["kind"] = "other"
+            }
+            if let range = entity.match.range {
+                let span = NSRange(range, in: transcript)
+                value["text"] = String(transcript[range]); value["startUTF16"] = span.location; value["lengthUTF16"] = span.length
+            }
+            return value
+        }
+    }
+    var documents: [[String: Any]] = []
+    for observation in observations {
+        let owner = observation.document.text
+        var document = documentRegion(observation.document.boundingRegion, width: image.width, height: image.height)
+        document["transcript"] = owner.transcript; document["observationConfidence"] = observation.confidence
+        document["lines"] = try owner.lines.map { try lineJSON($0, substrings: true) }
+        if let words = owner.words { document["nativeWords"] = try words.map { try lineJSON($0, substrings: false) } }
+        else { document["nativeWords"] = NSNull() }
+        document["entities"] = entities(owner)
+        document["tables"] = observation.document.tables.map { table in
+            var value = documentRegion(table.boundingRegion, width: image.width, height: image.height)
+            value["rowCount"] = table.rows.count; value["columnCount"] = table.columns.count
+            value["cells"] = table.rows.enumerated().flatMap { rowIndex, row in
+                row.enumerated().map { occurrence, cell in
+                    var record = documentRegion(cell.content.boundingRegion, width: image.width, height: image.height)
+                    let text = cell.content.text
+                    record["returnedRowIndex"] = rowIndex; record["returnedOccurrenceIndex"] = occurrence
+                    record["rowSpan"] = [cell.rowRange.lowerBound, cell.rowRange.upperBound]
+                    record["columnSpan"] = [cell.columnRange.lowerBound, cell.columnRange.upperBound]
+                    record["transcript"] = text.transcript; record["entities"] = entities(text)
+                    return record
+                }
+            }
+            return value
+        }
+        documents.append(document)
+    }
+    return ["complete": true, "request": config, "recognitionAndSerializationMs": Date().timeIntervalSince(started)*1000, "documents": documents]
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+func documentProbe(_ directory: URL, platform: String) async throws -> [String: Any] {
+    let bytes = try Data(contentsOf: directory.appendingPathComponent("inputs.json"))
+    guard let input = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+          let pages = input["pages"] as? [[String: Any]], let control = input["documentControl"] as? [String: Any] else { throw ProofError(description: "Missing document diagnostic inputs") }
+    var results: [[String: Any]] = []
+    for page in [["id": "synthetic-document-control", "render": control] as [String: Any]] + pages {
+        guard let id = page["id"] as? String, let info = page["render"] as? [String: Any],
+              let width = info["width"] as? Int, let height = info["height"] as? Int, let stride = info["bytesPerRow"] as? Int,
+              let expected = info["pixelSha256"] as? String else { throw ProofError(description: "Invalid document input metadata") }
+        var result: [String: Any] = ["id": id, "render": info]
+        do {
+            let pixels = try Data(contentsOf: directory.appendingPathComponent(id + ".rgba"))
+            let image = try rawImage(pixels, width: width, height: height, stride: stride, expectedHash: expected)
+            result["inputBytesVerified"] = true
+            result["reading"] = try await documentRead(image)
+        } catch { result["error"] = String(describing: error) }
+        results.append(result)
+    }
+    return ["scope": "Separate default document-layout diagnostic; no price promotion, currency authority or phone claim",
+            "inputManifestSha256": hash(bytes), "records": results, "platform": platform,
+            "sourceRevision": ProcessInfo.processInfo.environment["GITHUB_SHA"] ?? Bundle.main.object(forInfoDictionaryKey: "ProofSourceRevision") as? String ?? "local",
+            "runIdentity": input["runIdentity"] ?? "missing", "operatingSystem": ProcessInfo.processInfo.operatingSystemVersionString]
+}

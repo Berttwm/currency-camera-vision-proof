@@ -49,6 +49,12 @@ jobs:
           echo CURRENCY_CAMERA_MAC_JSON_BEGIN
           cat "$RUNNER_TEMP/mac-result.json"
           printf '\nCURRENCY_CAMERA_MAC_JSON_END\n'
+      - name: Read separate document layout on Mac after preserving baseline
+        run: |
+          "$RUNNER_TEMP/mac-proof" --documents "$PWD/Inputs" > "$RUNNER_TEMP/mac-document.json"
+          echo CURRENCY_CAMERA_DOCUMENT_MAC_JSON_BEGIN
+          cat "$RUNNER_TEMP/mac-document.json"
+          printf '\nCURRENCY_CAMERA_DOCUMENT_MAC_JSON_END\n'
       - name: Build the Simulator app without account or provisioning changes
         run: |
           python3 - <<'PY'
@@ -144,6 +150,18 @@ jobs:
               assert a['id'] == b['id'] and a['render'] == b['render'], 'Pixel metadata differs'
               assert a['inputBytesVerified'] is True and b['inputBytesVerified'] is True
           print('Same raw RGBA8 bytes verified on both platforms. Static result only; accuracy is scored separately.')
+          document_path = result_path.with_name('document-result-' + identity + '.json')
+          while not document_path.exists() and time.monotonic() < deadline:
+              time.sleep(1)
+          assert document_path.exists(), 'Document diagnostic timed out; baseline output above remains preserved'
+          assert document_path.stat().st_size + result_path.stat().st_size < 4_000_000, 'Combined iOS JSON exceeds log cap'
+          print('CURRENCY_CAMERA_DOCUMENT_IOS_JSON_BEGIN')
+          print(document_path.read_text())
+          print('CURRENCY_CAMERA_DOCUMENT_IOS_JSON_END')
+          diagnostic = json.loads(document_path.read_text())
+          assert 'error' not in diagnostic, diagnostic
+          assert diagnostic['runIdentity'] == identity and diagnostic['sourceRevision'] == os.environ['GITHUB_SHA']
+          assert diagnostic['inputManifestSha256'] == ios['inputManifestSha256']
           PY
       - name: Stop the ephemeral Simulator
         if: always()
