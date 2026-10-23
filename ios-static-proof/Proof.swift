@@ -307,10 +307,18 @@ func documentRegion(_ region: NormalizedRegion, width: Int, height: Int) -> [Str
 
 @available(macOS 26.0, iOS 26.0, *)
 func documentRead(_ image: CGImage) async throws -> [String: Any] {
-    let request = RecognizeDocumentsRequest()
+    var request = RecognizeDocumentsRequest()
+    let defaults = request.textRecognitionOptions
+    let defaultOptions: [String: Any] = [
+        "languages": defaults.recognitionLanguages.map { $0.minimalIdentifier }, "automaticallyDetectLanguage": defaults.automaticallyDetectLanguage,
+        "useLanguageCorrection": defaults.useLanguageCorrection, "customWords": defaults.customWords,
+        "maximumCandidateCount": defaults.maximumCandidateCount, "minimumTextHeightFraction": defaults.minimumTextHeightFraction]
+    request.textRecognitionOptions.minimumTextHeightFraction = 0
     let options = request.textRecognitionOptions
+    try require(options.minimumTextHeightFraction == 0, "Document minimum height setter was not retained")
     let config: [String: Any] = [
-        "policy": "SDK defaults; getters captured before inference; no options assigned",
+        "policy": "Minimum height zero only; SDK defaults and applied getters captured before inference",
+        "sdkDefaultOptions": defaultOptions,
         "revision": String(describing: request.revision), "supportedRevisions": RecognizeDocumentsRequest.supportedRevisions.map { String(describing: $0) },
         "supportedLanguages": request.supportedRecognitionLanguages.map { $0.minimalIdentifier },
         "languages": options.recognitionLanguages.map { $0.minimalIdentifier }, "automaticallyDetectLanguage": options.automaticallyDetectLanguage,
@@ -414,7 +422,7 @@ func documentProbe(_ directory: URL, platform: String) async throws -> [String: 
         } catch { result["error"] = String(describing: error) }
         results.append(result)
     }
-    return ["scope": "Separate default document-layout diagnostic; no price promotion, currency authority or phone claim",
+    return ["scope": "Separate minimum-height-zero document-layout diagnostic; no price promotion, currency authority or phone claim",
             "inputManifestSha256": hash(bytes), "records": results, "platform": platform,
             "sourceRevision": ProcessInfo.processInfo.environment["GITHUB_SHA"] ?? Bundle.main.object(forInfoDictionaryKey: "ProofSourceRevision") as? String ?? "local",
             "runIdentity": input["runIdentity"] ?? "missing", "operatingSystem": ProcessInfo.processInfo.operatingSystemVersionString]
