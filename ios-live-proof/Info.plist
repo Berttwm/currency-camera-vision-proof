@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+ <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+ <key>CFBundleIdentifier</key><string>org.currencycamera.liveproof</string>
+ <key>CFBundleExecutable</key><string>CurrencyLiveProof</string>
+ <key>CFBundleName</key><string>CurrencyLiveProof</string>
+ <key>CFBundleDisplayName</key><string>Currency Reader Test</string>
+ <key>CFBundlePackageType</key><string>APPL</string>
+ <key>CFBundleVersion</key><string>1</string>
+ <key>CFBundleShortVersionString</key><string>0.1</string>
+ <key>LSRequiresIPhoneOS</key><true/>
+ <key>UIDeviceFamily</key><array><integer>1</integer></array>
+ <key>NSCameraUsageDescription</key><string>Compare Apple's live currency reader with its text reader. Test images and text are saved locally for review.</string>
+ <key>UIFileSharingEnabled</key><true/>
+ <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>
+ <key>UILaunchScreen</key><dict/>
+ <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
+</dict></plist>

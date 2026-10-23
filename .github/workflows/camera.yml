@@ -1,0 +1,137 @@
+name: Live currency proof build and availability check
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    if: ${{ github.event.repository.visibility == 'public' }}
+    runs-on: macos-26
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ios-live-proof
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check local record writer and installed platform inventory
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun swiftc --version
+          xcrun swiftc -O -parse-as-library -D RECORD_SELF_TEST Record.swift -o "$RUNNER_TEMP/record-check"
+          "$RUNNER_TEMP/record-check"
+          xcrun simctl list --json > "$RUNNER_TEMP/simulators.json"
+          python3 - <<'PY'
+          import json, os, plistlib
+          from pathlib import Path
+          inventory = json.loads(Path(os.environ['RUNNER_TEMP'], 'simulators.json').read_text())
+          choices = []
+          for runtime in inventory['runtimes']:
+              if not runtime.get('isAvailable') or not runtime['identifier'].startswith('com.apple.CoreSimulator.SimRuntime.iOS-'):
+                  continue
+              version = tuple(map(int, runtime['version'].split('.')))
+              if version[0] != 26:
+                  continue
+              for device in inventory['devices'].get(runtime['identifier'], []):
+                  if device.get('isAvailable') and device['name'].startswith('iPhone') and device['state'] == 'Shutdown':
+                      choices.append((version, device['name'] == 'iPhone 17', runtime, device))
+          assert choices, 'No installed iOS26 iPhone Simulator; do not download or pay'
+          _, _, runtime, device = max(choices, key=lambda x: (x[0], x[1], x[3]['name']))
+          print(json.dumps({'runtime': runtime, 'device': device}))
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('PROOF_SIMULATOR=' + device['udid'] + '\n')
+          info = plistlib.loads(Path('Info.plist').read_bytes())
+          info['ProofSourceRevision'] = os.environ['GITHUB_SHA']
+          info['ProofRunIdentity'] = os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
+          with Path(os.environ['RUNNER_TEMP'], 'camera-info.plist').open('xb') as out:
+              plistlib.dump(info, out)
+          PY
+      - name: Compile Simulator and unsigned physical-device app
+        run: |
+          if ! xcodebuild -project CurrencyLiveProof.xcodeproj -scheme CurrencyLiveProof -configuration Release -sdk iphonesimulator -destination "platform=iOS Simulator,id=$PROOF_SIMULATOR" -derivedDataPath "$RUNNER_TEMP/camera-sim" "INFOPLIST_FILE=$RUNNER_TEMP/camera-info.plist" build > "$RUNNER_TEMP/camera-sim.log" 2>&1; then
+            tail -n 200 "$RUNNER_TEMP/camera-sim.log"
+            exit 1
+          fi
+          tail -n 20 "$RUNNER_TEMP/camera-sim.log"
+          if ! xcodebuild -project CurrencyLiveProof.xcodeproj -scheme CurrencyLiveProof -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/camera-device" "INFOPLIST_FILE=$RUNNER_TEMP/camera-info.plist" CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/camera-device.log" 2>&1; then
+            tail -n 200 "$RUNNER_TEMP/camera-device.log"
+            exit 1
+          fi
+          tail -n 20 "$RUNNER_TEMP/camera-device.log"
+          python3 - <<'PY'
+          import json, os, plistlib
+          from pathlib import Path
+          temp = Path(os.environ['RUNNER_TEMP'])
+          for folder, platform in [('camera-sim', 'iphonesimulator'), ('camera-device', 'iphoneos')]:
+              app = temp / folder / 'Build/Products' / ('Release-' + platform) / 'CurrencyLiveProof.app'
+              info = plistlib.loads((app / 'Info.plist').read_bytes())
+              assert info['CFBundleIdentifier'] == 'org.currencycamera.liveproof'
+              assert info['ProofSourceRevision'] == os.environ['GITHUB_SHA']
+              assert info['ProofRunIdentity'] == os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
+              assert info['NSCameraUsageDescription'] and info['UIFileSharingEnabled'] is True
+              assert info['CFBundleSupportedPlatforms'] == [ 'iPhoneSimulator' if platform == 'iphonesimulator' else 'iPhoneOS' ]
+              assert info['MinimumOSVersion'] == '17.0'
+              assert (app / 'CurrencyLiveProof').is_file()
+              print('CAMERA_BUILT_METADATA ' + json.dumps({'platform': platform, 'info': info}, sort_keys=True))
+          PY
+      - name: Measure Simulator availability without camera access
+        run: |
+          xcrun simctl boot "$PROOF_SIMULATOR"
+          xcrun simctl bootstatus "$PROOF_SIMULATOR" -b
+          xcrun simctl install "$PROOF_SIMULATOR" "$RUNNER_TEMP/camera-sim/Build/Products/Release-iphonesimulator/CurrencyLiveProof.app"
+          SIMCTL_CHILD_CAMERA_GUARD_ONLY=1 xcrun simctl launch "$PROOF_SIMULATOR" org.currencycamera.liveproof
+          xcrun simctl get_app_container "$PROOF_SIMULATOR" org.currencycamera.liveproof data > "$RUNNER_TEMP/camera-container"
+          python3 - <<'PY'
+          import json, os, time
+          from pathlib import Path
+          folder = Path(Path(os.environ['RUNNER_TEMP'], 'camera-container').read_text().strip()) / 'Documents'
+          path = folder / 'guard-result.json'
+          deadline = time.monotonic() + 30
+          while not path.exists() and time.monotonic() < deadline:
+              time.sleep(0.5)
+          assert path.is_file() and path.stat().st_size < 8192, 'Availability record missing or oversized'
+          result = json.loads(path.read_text())
+          print('CAMERA_GUARD_JSON_BEGIN\n' + json.dumps(result, sort_keys=True) + '\nCAMERA_GUARD_JSON_END')
+          assert result['sourceRevision'] == os.environ['GITHUB_SHA']
+          assert result['runIdentity'] == os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
+          assert result['operatingSystem'].startswith('Version 26.')
+          assert type(result['isSupported']) is bool and type(result['isAvailable']) is bool
+          assert sorted(p.name for p in folder.iterdir()) == ['guard-result.json'], 'Unexpected camera session in guard-only mode'
+          print('Availability only; no camera recognition or phone validation')
+          PY
+      - name: Preserve bounded unsigned device binary in public log
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, zipfile
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP'], 'CurrencyLiveProof.ipa')
+          app = Path(os.environ['RUNNER_TEMP'], 'camera-device/Build/Products/Release-iphoneos/CurrencyLiveProof.app')
+          with zipfile.ZipFile(path, 'x', compression=zipfile.ZIP_DEFLATED) as archive:
+              for source in sorted(app.rglob('*')):
+                  assert not source.is_symlink(), 'Unexpected bundle symlink'
+                  if source.is_file():
+                      archive.write(source, 'Payload/CurrencyLiveProof.app/' + source.relative_to(app).as_posix())
+          assert path.stat().st_size < 3_000_000, 'Unsigned IPA exceeds public-log cap; preserve failure'
+          with zipfile.ZipFile(path) as archive:
+              names = archive.namelist()
+              assert 'Payload/CurrencyLiveProof.app/Info.plist' in names
+              assert 'Payload/CurrencyLiveProof.app/CurrencyLiveProof' in names
+              assert all(n.startswith('Payload/') and '..' not in n.split('/') for n in names)
+              assert not any(n.endswith('embedded.mobileprovision') or '_CodeSignature/' in n for n in names), 'Signing material not allowed'
+          data = path.read_bytes()
+          encoded = base64.b64encode(data).decode('ascii')
+          envelope = {'encoding': 'base64', 'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
+              'sourceRevision': os.environ['GITHUB_SHA'], 'runIdentity': os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'],
+              'base64': [encoded[i:i+4096] for i in range(0, len(encoded), 4096)]}
+          wire = json.dumps(envelope, indent=2)
+          assert len(wire.encode()) < 4_100_000, 'Envelope cap'
+          print('CAMERA_UNSIGNED_IPA_JSON_BEGIN\n' + wire + '\nCAMERA_UNSIGNED_IPA_JSON_END')
+          PY
+      - name: Stop ephemeral Simulator
+        if: always()
+        run: |
+          if [ -n "${PROOF_SIMULATOR:-}" ]; then
+            xcrun simctl shutdown "$PROOF_SIMULATOR" || true
+          fi
